@@ -43,6 +43,10 @@ app = FastAPI()
 api_key_header = APIKeyHeader(name="ST_API_KEY", auto_error=False)
 security = HTTPBasic()
 
+# Setup basic configuration for logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
     if api_key_header is not None and api_key_header in API_KEYS:
@@ -156,12 +160,12 @@ async def main():
                     duration_hours = duration_seconds / 3600
                     ages.append(duration_hours)
 
-                # Update the miner registration statuses
-                db.update_miner_reg_statuses(active_uids, active_hotkeys)
+                # # Update the miner registration statuses
+                # db.update_miner_reg_statuses(active_uids, active_hotkeys)
 
                 # Combine the data into a list of tuples
-                data_to_update = list(zip(active_coldkeys, ages, active_hotkeys))
-                db.update_miner_coldkeys_and_ages(data_to_update)
+                data_to_update = list(zip(active_hotkeys, active_coldkeys, active_uids, ages))
+                db.insert_or_update_miner_coldkeys_and_ages(data_to_update)
 
             # In case of unforeseen errors, the api will log the error and continue operations.
             except Exception as err:
@@ -234,6 +238,30 @@ async def main():
             logging.error(f"Error retrieving matches: {e}")
             raise HTTPException(status_code=500, detail="Internal server error.")
 
+    @app.get("/matches/upcoming")
+    def get_upcoming_matches():
+        try:
+            match_list = db.get_upcoming_matches()
+            if match_list:
+                return {"matches": match_list}
+            else:
+                return {"matches": []}
+        except Exception as e:
+            logging.error(f"Error retrieving matches: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error.")
+        
+    @app.get("/matches/all")
+    def get_all_matches():
+        try:
+            match_list = db.get_matches(all=True)
+            if match_list:
+                return {"matches": match_list}
+            else:
+                return {"matches": []}
+        except Exception as e:
+            logging.error(f"Error retrieving matches: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error.")
+
     @app.get("/get-match")
     async def get_match(id: str):
         try:
@@ -246,6 +274,18 @@ async def main():
                 return {"message": "No match found for the given ID."}
         except Exception as e:
             logging.error(f"Error retrieving get-match: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error.")
+
+    @app.get("/matchOdds")
+    async def get_match_odds(matchId: Optional[str] = None):
+        try:
+            match_odds = db.get_match_odds_by_id(matchId)
+            if match_odds:
+                return {"match_odds": match_odds}
+            else:
+                return {"match_odds": []}
+        except Exception as e:
+            logging.error(f"Error retrieving match odds by match id: {e}")
             raise HTTPException(status_code=500, detail="Internal server error.")
 
     @app.get("/get-prediction")
@@ -362,9 +402,9 @@ async def main():
             logging.error(f"Error posting AppMatchPredictionsForValidators: {e}")
             raise HTTPException(status_code=500, detail="Internal server error.")
 
-    @app.post("/predictionResults")
-    async def upload_prediction_results(
-        prediction_results: dict = Body(...),
+    @app.post("/predictionEdgeResults")
+    async def upload_prediction_edge_results(
+        prediction_edge_results: dict = Body(...),
         hotkey: Annotated[str, Depends(get_hotkey)] = None,
     ):
         if not authenticate_with_bittensor(hotkey, metagraph):
@@ -377,56 +417,59 @@ async def main():
         uid = metagraph.hotkeys.index(hotkey)
 
         try:
-            result = db.upload_prediction_results(prediction_results)
+            result = db.upload_prediction_edge_results(prediction_edge_results)
             if result:
                 return {
-                    "message": "Prediction results uploaded successfully from validator "
+                    "message": "Prediction edge results uploaded successfully from validator "
                     + str(uid)
                 }
             else:
                 raise HTTPException(
-                    status_code=500, detail="Failed to upload prediction results from validator "
+                    status_code=500, detail="Failed to upload prediction edge results from validator "
                     + str(uid)
                 )
         except Exception as e:
-            logging.error(f"Error posting predictionResults: {e}")
+            logging.error(f"Error posting predictionEdgeResults: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error.")
+    
+    @app.post("/scoredPredictions")
+    async def upload_scored_predictions(
+        predictions: dict = Body(...),
+        hotkey: Annotated[str, Depends(get_hotkey)] = None,
+    ):
+        if not authenticate_with_bittensor(hotkey, metagraph):
+            print(f"Valid hotkey required, returning 403. hotkey: {hotkey}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Valid hotkey required.",
+            )
+        # get uid of bittensor validator
+        uid = metagraph.hotkeys.index(hotkey)
+
+        try:
+            result = db.upload_scored_predictions(predictions, hotkey)
+            if result:
+                return {
+                    "message": "Scored predictions uploaded successfully from validator "
+                    + str(uid)
+                }
+            else:
+                raise HTTPException(
+                    status_code=500, detail="Failed to upload scored predictions from validator "
+                    + str(uid)
+                )
+        except Exception as e:
+            logging.error(f"Error posting scoredPredictions: {e}")
             raise HTTPException(status_code=500, detail="Internal server error.")
 
     @app.get("/predictionResults")
     async def get_prediction_results(
+        vali_hotkey: str,
         miner_hotkey: Optional[str] = None,
-        sport: Optional[str] = None,
         league: Optional[str] = None,
     ):
         try:
-            if league is not None:
-                results = db.get_prediction_stats_by_league(league, miner_hotkey)
-            elif sport is not None:
-                results = db.get_prediction_stats_by_sport(sport, miner_hotkey)
-            else:
-                results = db.get_prediction_stats_total(miner_hotkey)
-
-            if results:
-                return {"results": results}
-            else:
-                return {"results": []}
-        except Exception as e:
-            logging.error(f"Error retrieving predictionResults: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error.")
-
-    @app.get("/predictionResultsPerMiner")
-    async def get_prediction_results_per_miner(
-        miner_hotkey: Optional[str] = None,
-        sport: Optional[str] = None,
-        league: Optional[str] = None,
-    ):
-        try:
-            if league is not None:
-                results = db.get_prediction_stats_by_league(league, miner_hotkey, True)
-            elif sport is not None:
-                results = db.get_prediction_stats_by_sport(sport, miner_hotkey, True)
-            else:
-                results = db.get_prediction_stats_total(miner_hotkey, True)
+            results = db.get_prediction_results_by_league(vali_hotkey, league, miner_hotkey)
 
             if results:
                 return {"results": results}
@@ -435,7 +478,25 @@ async def main():
         except Exception as e:
             logging.error(f"Error retrieving predictionResultsPerMiner: {e}")
             raise HTTPException(status_code=500, detail="Internal server error.")
-        
+
+    @app.get("/predictionResultsPerMiner")
+    async def get_prediction_results_per_miner(
+        vali_hotkey: str,
+        miner_hotkey: Optional[str] = None,
+        league: Optional[str] = None,
+        cutoff: Optional[int] = None
+    ):
+        try:
+            results = db.get_prediction_stats_by_league(vali_hotkey, league, miner_hotkey, cutoff)
+
+            if results:
+                return {"results": results}
+            else:
+                return {"results": []}
+        except Exception as e:
+            logging.error(f"Error retrieving predictionResults: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error.")    
+    
     @app.get("/predictionResultsSnapshots")
     async def get_prediction_results_snapshots(
         miner_hotkey: Optional[str] = None,
